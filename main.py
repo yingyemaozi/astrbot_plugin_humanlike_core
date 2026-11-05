@@ -16,7 +16,7 @@ class HumanlikeCorePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config if config else {}
-        logger.info("✨ 拟人化核心 V1.3 (多维共鸣版) 已成功加载！")
+        logger.info("✨ 拟人化核心 V1.1 已成功加载！")
         
         self.db_path = os.path.join(os.path.dirname(__file__), "humanlike_v1.db")
         self.init_db()
@@ -33,20 +33,16 @@ class HumanlikeCorePlugin(Star):
             "讨厌": ["恶心", "受不了", "不喜欢", "烦人"]
         }
         
-        # 真情实感词库（用于灵魂共鸣）
         self.soul_words = ["撑不住", "好累", "崩溃", "迷茫", "害怕", "孤独", "焦虑", "想哭", "其实我", "小时候", "秘密", "人生"]
-        # 语气词与互动词库（用于默契羁绊）
         self.tacit_words = ["哈哈", "嘿", "嘻", "嘞", "啦", "呗", "嘛", "捏"]
 
     def init_db(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        # 记忆表
         c.execute('''CREATE TABLE IF NOT EXISTS memories
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       user_id TEXT, content TEXT, score REAL,
                       last_time REAL, is_shadow INTEGER DEFAULT 0)''')
-        # 情感表 (新增 soul_added_today 和 last_soul_time 用于冷却)
         c.execute('''CREATE TABLE IF NOT EXISTS stats
                      (user_id TEXT PRIMARY KEY,
                       mood REAL DEFAULT 50.0,
@@ -58,7 +54,6 @@ class HumanlikeCorePlugin(Star):
                       tacit_added_today REAL DEFAULT 0.0,
                       soul_added_today REAL DEFAULT 0.0,
                       last_soul_time REAL DEFAULT 0.0)''')
-        # 日记表
         c.execute('''CREATE TABLE IF NOT EXISTS diaries
                      (user_id TEXT, date_str TEXT, content TEXT,
                       PRIMARY KEY (user_id, date_str))''')
@@ -110,7 +105,6 @@ class HumanlikeCorePlugin(Star):
             soul_added = row[7] or 0.0
             last_soul_time = row[8] or 0.0
             
-            # 跨天重置逻辑
             if last_day != today_str:
                 mood = 50.0 + (mood - 50.0) * 0.25 + random.uniform(-5, 5)
                 mood = max(0.0, min(100.0, mood))
@@ -118,23 +112,17 @@ class HumanlikeCorePlugin(Star):
                 c.execute("UPDATE stats SET mood = ?, last_decay_day = ?, base_added_today = 0.0, tacit_added_today = 0.0, soul_added_today = 0.0 WHERE user_id = ?", (mood, today_str, user_id))
 
         # ================= 3. 三阶亲密度增长机制 =================
-        
-        # 3.1 基础好感增长 (每日上限 4.0)
         if len(text) >= 3 and base < 50.0 and base_added < 4.0:
             base += 0.5
             base_added += 0.5
             c.execute("UPDATE stats SET base_added_today = ? WHERE user_id = ?", (base_added, user_id))
 
-        # 3.2 默契羁绊增长 (每日上限 2.0，看语气词和互动动作)
         if tacit < 25.0 and tacit_added < 2.0:
             tacit_gain = 0.0
-            # 判定A：带括号的动作 (比如 *(捏脸)*)
             if re.search(r'[（\(].*?[）\)]', text):
                 tacit_gain = 0.5
-            # 判定B：大量语气词或反问 (说明聊嗨了)
             elif any(w in text for w in self.tacit_words) or text.endswith(('嘛', '呢', '呀')):
                 tacit_gain = 0.5
-            # 判定C：吵架与和解
             elif any(w in text for w in ["对不起", "原谅", "我错"]):
                 tacit_gain = 1.0
 
@@ -144,11 +132,8 @@ class HumanlikeCorePlugin(Star):
                 tacit_added += actual_gain
                 c.execute("UPDATE stats SET tacit_added_today = ? WHERE user_id = ?", (tacit_added, user_id))
 
-        # 3.3 灵魂共鸣增长 (每日上限 1.5，带 24 小时情绪冷却)
         if soul < 25.0 and soul_added < 1.5:
-            # 检查是否触及真情实感
             if any(w in text for w in self.soul_words):
-                # 冷却判定：距离上次灵魂共鸣是否超过 24 小时 (86400秒)
                 if now - last_soul_time > 86400:
                     soul += 1.0
                     soul_added += 1.0
@@ -158,11 +143,9 @@ class HumanlikeCorePlugin(Star):
                 else:
                     logger.info(f"⏳ 触发灵魂词汇，但处于情绪冷却中，未加分。")
 
-        # 心情微调
         if "开心" in text: mood = min(100.0, mood + 5.0)
         if "难过" in text: mood = max(0.0, mood - 5.0)
 
-        # 更新总表
         c.execute("UPDATE stats SET mood=?, base_intimacy=?, tacit_intimacy=?, soul_intimacy=? WHERE user_id=?",
                   (mood, base, tacit, soul, user_id))
         conn.commit()
@@ -322,4 +305,4 @@ class HumanlikeCorePlugin(Star):
 
     @filter.command("ping")
     async def ping(self, event: AstrMessageEvent):
-        yield event.plain_result("我在呢，V1.3 多维共鸣版运行正常。")
+        yield event.plain_result("我在呢，V1.1 运行正常。")
