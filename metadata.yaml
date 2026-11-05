@@ -1,6 +1,6 @@
 name: astrbot_plugin_humanlike_core
 display_name: 拟人化记忆核心 (Humanlike Core)
 desc: 纯本地运行的轻量级拟人记忆插件。自带记忆衰减、三阶亲密度演进、情感波动与日记本。
-version: 1.0.0
+version: 1.1.0
 author: yingyemaozi
 repo: "https://github.com/yingyemaozi/astrbot_plugin_humanlike_core"
