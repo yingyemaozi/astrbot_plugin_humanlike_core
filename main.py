@@ -16,7 +16,7 @@ class HumanlikeCorePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config if config else {}
-        logger.info("✨ 拟人化核心 V1.0 已加载！")
+        logger.info("✨ 拟人化核心 V1.0 已成功加载！")
         
         self.db_path = os.path.join(os.path.dirname(__file__), "humanlike_v1.db")
         self.init_db()
@@ -26,7 +26,6 @@ class HumanlikeCorePlugin(Star):
         self.max_len = self.config.get("max_reply_length", 20)
         self.enable_diary = self.config.get("enable_diary", True)
 
-        # 语义联想库
         self.synonyms = {
             "生日": ["蛋糕", "甜的", "许愿", "礼物", "过生"],
             "难过": ["烦", "emo", "伤心", "哭", "低落", "不开心"],
@@ -50,6 +49,10 @@ class HumanlikeCorePlugin(Star):
                       tacit_intimacy REAL DEFAULT 0.0,
                       soul_intimacy REAL DEFAULT 0.0,
                       last_decay_day TEXT DEFAULT '')''')
+        # 自动为旧数据库添加 base_added_today 字段（防报错兼容）
+        try: c.execute("ALTER TABLE stats ADD COLUMN base_added_today REAL DEFAULT 0.0")
+        except Exception: pass
+        
         # 日记表
         c.execute('''CREATE TABLE IF NOT EXISTS diaries
                      (user_id TEXT, date_str TEXT, content TEXT,
@@ -89,23 +92,29 @@ class HumanlikeCorePlugin(Star):
                       (user_id, text, score, now))
 
         # ================= 2. 每日情感回归与数据初始化 =================
-        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, last_decay_day FROM stats WHERE user_id = ?", (user_id,))
+        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, last_decay_day, base_added_today FROM stats WHERE user_id = ?", (user_id,))
         row = c.fetchone()
         
         if not row:
-            c.execute("INSERT INTO stats (user_id, last_decay_day) VALUES (?, ?)", (user_id, today_str))
-            mood, base, tacit, soul = 50.0, 0.0, 0.0, 0.0
+            c.execute("INSERT INTO stats (user_id, last_decay_day, base_added_today) VALUES (?, ?, ?)", (user_id, today_str, 0.0))
+            mood, base, tacit, soul, last_day, base_added_today = 50.0, 0.0, 0.0, 0.0, today_str, 0.0
         else:
-            mood, base, tacit, soul, last_day = row
+            mood, base, tacit, soul, last_day = row[0], row[1], row[2], row[3], row[4]
+            base_added_today = row[5] if row[5] is not None else 0.0
+            
             # 心情回归函数 (跨天触发)
             if last_day != today_str:
                 mood = 50.0 + (mood - 50.0) * 0.25 + random.uniform(-5, 5)
                 mood = max(0.0, min(100.0, mood))
-                c.execute("UPDATE stats SET mood = ?, last_decay_day = ? WHERE user_id = ?", (mood, today_str, user_id))
+                base_added_today = 0.0 # 新的一天，清空今日基础好感获取
+                c.execute("UPDATE stats SET mood = ?, last_decay_day = ?, base_added_today = 0.0 WHERE user_id = ?", (mood, today_str, user_id))
 
         # ================= 3. 三阶亲密度增长机制 =================
-        # 基础增长 (上限50)
-        base = min(50.0, base + 0.5)
+        # 基础好感增长限制：每天最多加 4.0，单次 +0.5
+        if len(text) >= 3 and base < 50.0 and base_added_today < 4.0:
+            base += 0.5
+            base_added_today += 0.5
+            c.execute("UPDATE stats SET base_added_today = ? WHERE user_id = ?", (base_added_today, user_id))
         
         # 默契/羁绊增长 (吵架和解、吐槽)
         if any(w in text for w in ["对不起", "原谅", "吵架", "傻逼", "卧槽"]):
@@ -125,12 +134,11 @@ class HumanlikeCorePlugin(Star):
         conn.commit()
         conn.close()
 
-        # ================= 4. 赛博日记本触发 (每日一次) =================
+        # ================= 4. 赛博日记本触发 =================
         if self.enable_diary:
             await self.generate_diary(user_id, today_str)
 
     async def generate_diary(self, user_id, today_str):
-        # 检查今天有没有写日记
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute("SELECT content FROM diaries WHERE user_id=? AND date_str=?", (user_id, today_str))
@@ -138,7 +146,6 @@ class HumanlikeCorePlugin(Star):
             conn.close()
             return
             
-        # 提取今天的记忆
         c.execute("SELECT content, score FROM memories WHERE user_id=? AND last_time > ?", (user_id, time.time() - 86400))
         today_memories = c.fetchall()
         conn.close()
@@ -146,12 +153,7 @@ class HumanlikeCorePlugin(Star):
         if not today_memories:
             return
 
-        # 随机决定字数与心情
         mem_str = "，".join([m[0] for m in today_memories[:5]])
-        diary_content = f"（基于以下记忆，用第一人称写一篇简短的日记，字数随意，符合当前心境）：{mem_str}"
-        
-        # 这里为了不阻塞主线程，简单起个任务(实际开发建议用 context 提供的 llm 接口)
-        # 为了 V1.0 稳定，我们先用一个占位符，晚上测试可以直接在终端看日志
         logger.info(f"📝 正在生成 {user_id} 的日记，今日素材: {mem_str}")
 
     @filter.on_llm_request()
@@ -167,13 +169,11 @@ class HumanlikeCorePlugin(Star):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        # 获取情感与关系
         c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy FROM stats WHERE user_id = ?", (user_id,))
         row = c.fetchone()
-        mood, base, tacit, soul = row if row else (50, 0, 0, 0)
+        mood, base, tacit, soul = row if row else (50.0, 0.0, 0.0, 0.0)
         total_intimacy = base + tacit + soul
 
-        # 1. 记忆检索与衰减计算
         c.execute("SELECT id, content, score, last_time, is_shadow FROM memories WHERE user_id = ?", (user_id,))
         rows = c.fetchall()
 
@@ -186,19 +186,15 @@ class HumanlikeCorePlugin(Star):
         
         for mid, content, score, last_time, is_shadow in rows:
             days = (now - last_time) / 86400.0
-            # 记忆衰减函数 (每天乘以 0.85)
             current_score = score * math.pow(self.decay_rate, days)
             
-            # 如果分数跌破阈值，且原来不是影子，更新数据库
             if current_score < self.shadow_threshold and is_shadow == 0:
                 c.execute("UPDATE memories SET is_shadow = 1 WHERE id = ?", (mid,))
                 is_shadow = 1
 
-            # 常规检索，跳过影子
             if is_shadow == 0:
                 valid_memories.append((current_score, content))
             else:
-                # 影子唤醒机制 (只有触发联想词才模糊唤醒)
                 if any(word in content for word in expand_keywords):
                     valid_memories.append((current_score, f"（模糊的记忆）你隐约记得：{content}..."))
                     logger.info(f"🌑 唤醒模糊影子记忆: {content}")
@@ -206,11 +202,9 @@ class HumanlikeCorePlugin(Star):
         conn.commit()
         conn.close()
 
-        # 排序取前3
         valid_memories.sort(reverse=True, key=lambda x: x[0])
         top_memories = [m[1] for m in valid_memories[:3]]
 
-        # 2. 关系判定
         if total_intimacy > 80 and soul > 15:
             relation = "你们是灵魂伴侣/情侣，你极度依赖对方，可以撒娇吃醋。"
         elif total_intimacy > 60 and tacit > 10:
@@ -220,7 +214,6 @@ class HumanlikeCorePlugin(Star):
         else:
             relation = "你们刚认识，保持礼貌。"
 
-        # 心情表现
         if mood < 30:
             mood_text = "你现在心情极度低落，不想说话，回复极短或带省略号。"
         elif mood > 70:
@@ -230,7 +223,6 @@ class HumanlikeCorePlugin(Star):
 
         memory_text = "你记得：" + "，".join(top_memories) if top_memories else "你暂时没有清晰的记忆。"
 
-        # 3. 注入 Prompt
         sys_prompt = f"""
 【你的状态】{time_status}。{mood_text}
 【你的关系】{relation}
@@ -254,11 +246,9 @@ class HumanlikeCorePlugin(Star):
         result_text = result.get_plain_text()
         if not result_text: return
 
-        # 清洗机器味
         for word in ["作为一个AI", "人工智能", "很高兴为您服务"]:
             result_text = result_text.replace(word, "")
 
-        # 按标点切分，最多3段
         parts = [p.strip() for p in re.split(r'(?<=[。！？!?])', result_text) if p.strip()]
         parts = parts[:3]
 
@@ -278,12 +268,13 @@ class HumanlikeCorePlugin(Star):
         user_id = event.get_sender_id()
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy FROM stats WHERE user_id=?", (user_id,))
+        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, base_added_today FROM stats WHERE user_id=?", (user_id,))
         row = c.fetchone()
         conn.close()
         if row:
-            mood, base, tacit, soul = row
-            yield event.plain_result(f"❤️ 心情: {mood:.1f}/100\n🤝 基础好感: {base:.1f}/50\n🔥 默契羁绊: {tacit:.1f}/25\n✨ 灵魂共鸣: {soul:.1f}/25")
+            mood, base, tacit, soul, added = row
+            added = added if added else 0.0
+            yield event.plain_result(f"❤️ 心情: {mood:.1f}/100\n🤝 基础好感: {base:.1f}/50 (今日已加: {added:.1f}/4.0)\n🔥 默契羁绊: {tacit:.1f}/25\n✨ 灵魂共鸣: {soul:.1f}/25")
 
     @filter.command("ping")
     async def ping(self, event: AstrMessageEvent):
