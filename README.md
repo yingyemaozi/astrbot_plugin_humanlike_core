@@ -12,7 +12,7 @@
 
 ## 🚀 安装方法
 在 AstrBot 的 WebUI 后台 -> 插件 -> 从 URL 安装，粘贴本仓库链接：
-`https://github.com/yingyemaoz/astrbot_plugin_humanlike_core`
+`https://github.com/yingyemaozi/astrbot_plugin_humanlike_core`
 
 或直接将本文件夹放入 `data/plugins/` 目录下。
 
