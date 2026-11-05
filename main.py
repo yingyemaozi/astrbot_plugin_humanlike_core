@@ -48,11 +48,8 @@ class HumanlikeCorePlugin(Star):
                       base_intimacy REAL DEFAULT 0.0,
                       tacit_intimacy REAL DEFAULT 0.0,
                       soul_intimacy REAL DEFAULT 0.0,
-                      last_decay_day TEXT DEFAULT '')''')
-        # 自动为旧数据库添加 base_added_today 字段（防报错兼容）
-        try: c.execute("ALTER TABLE stats ADD COLUMN base_added_today REAL DEFAULT 0.0")
-        except Exception: pass
-        
+                      last_decay_day TEXT DEFAULT '',
+                      base_added_today REAL DEFAULT 0.0)''')
         # 日记表
         c.execute('''CREATE TABLE IF NOT EXISTS diaries
                      (user_id TEXT, date_str TEXT, content TEXT,
@@ -78,7 +75,6 @@ class HumanlikeCorePlugin(Star):
         if len(text) >= 3 and not text.endswith(('?', '？', '吗', '呢')):
             if any(w in text for w in ["记错了", "不对", "记住", "忘了"]):
                 score = 100.0
-                # 纠错机制：作废旧相关记忆
                 c.execute("UPDATE memories SET is_shadow = 1 WHERE user_id = ? AND content LIKE ?", (user_id, f"%{text[:5]}%"))
             elif any(w in text for w in ["难过", "崩溃", "开心", "激动", "喜欢", "讨厌"]):
                 score = 70.0
@@ -102,30 +98,25 @@ class HumanlikeCorePlugin(Star):
             mood, base, tacit, soul, last_day = row[0], row[1], row[2], row[3], row[4]
             base_added_today = row[5] if row[5] is not None else 0.0
             
-            # 心情回归函数 (跨天触发)
             if last_day != today_str:
                 mood = 50.0 + (mood - 50.0) * 0.25 + random.uniform(-5, 5)
                 mood = max(0.0, min(100.0, mood))
-                base_added_today = 0.0 # 新的一天，清空今日基础好感获取
+                base_added_today = 0.0
                 c.execute("UPDATE stats SET mood = ?, last_decay_day = ?, base_added_today = 0.0 WHERE user_id = ?", (mood, today_str, user_id))
 
         # ================= 3. 三阶亲密度增长机制 =================
-        # 基础好感增长限制：每天最多加 4.0，单次 +0.5
         if len(text) >= 3 and base < 50.0 and base_added_today < 4.0:
             base += 0.5
             base_added_today += 0.5
             c.execute("UPDATE stats SET base_added_today = ? WHERE user_id = ?", (base_added_today, user_id))
         
-        # 默契/羁绊增长 (吵架和解、吐槽)
         if any(w in text for w in ["对不起", "原谅", "吵架", "傻逼", "卧槽"]):
             tacit = min(25.0, tacit + 1.5)
             
-        # 灵魂共鸣增长 (深夜交心、秘密)
         bj_hour = datetime.now(timezone(timedelta(hours=8))).hour
         if (bj_hour >= 23 or bj_hour < 4) and any(w in text for w in ["秘密", "难过", "倾诉", "其实我"]):
             soul = min(25.0, soul + 2.0)
 
-        # 心情值微调
         if "开心" in text: mood = min(100.0, mood + 5.0)
         if "难过" in text: mood = max(0.0, mood - 5.0)
 
@@ -134,7 +125,6 @@ class HumanlikeCorePlugin(Star):
         conn.commit()
         conn.close()
 
-        # ================= 4. 赛博日记本触发 =================
         if self.enable_diary:
             await self.generate_diary(user_id, today_str)
 
@@ -197,7 +187,6 @@ class HumanlikeCorePlugin(Star):
             else:
                 if any(word in content for word in expand_keywords):
                     valid_memories.append((current_score, f"（模糊的记忆）你隐约记得：{content}..."))
-                    logger.info(f"🌑 唤醒模糊影子记忆: {content}")
 
         conn.commit()
         conn.close()
@@ -275,6 +264,19 @@ class HumanlikeCorePlugin(Star):
             mood, base, tacit, soul, added = row
             added = added if added else 0.0
             yield event.plain_result(f"❤️ 心情: {mood:.1f}/100\n🤝 基础好感: {base:.1f}/50 (今日已加: {added:.1f}/4.0)\n🔥 默契羁绊: {tacit:.1f}/25\n✨ 灵魂共鸣: {soul:.1f}/25")
+
+    # 🚨 这里就是你要的一键清除记忆功能！
+    @filter.command("forget")
+    async def forget(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # 直接把该用户的所有记忆和情感数据删个精光
+        c.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM stats WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        yield event.plain_result("（委屈巴巴）好啦，我已经把关于你的事情全都忘掉了... 我们重新认识一下吧。")
 
     @filter.command("ping")
     async def ping(self, event: AstrMessageEvent):
