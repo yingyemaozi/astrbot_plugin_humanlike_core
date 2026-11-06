@@ -16,7 +16,7 @@ class HumanlikeCorePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config if config else {}
-        logger.info("✨ 拟人化核心 V1.2 (生理引擎版) 已成功加载！")
+        logger.info("✨ 拟人化核心 V1.2 (终极生理与情感版) 已成功加载！")
         
         self.db_path = os.path.join(os.path.dirname(__file__), "humanlike_v1.db")
         self.init_db()
@@ -42,7 +42,6 @@ class HumanlikeCorePlugin(Star):
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       user_id TEXT, content TEXT, score REAL,
                       last_time REAL, is_shadow INTEGER DEFAULT 0)''')
-        # 新增了体力、睡眠、时间戳等生物钟字段
         c.execute('''CREATE TABLE IF NOT EXISTS stats
                      (user_id TEXT PRIMARY KEY,
                       mood REAL DEFAULT 50.0,
@@ -76,7 +75,6 @@ class HumanlikeCorePlugin(Star):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
 
-        # ================= 1. 获取或初始化数据 =================
         c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, last_decay_day, base_added_today, tacit_added_today, soul_added_today, last_soul_time, energy, sleepiness, last_interact, is_sleeping, wake_up_time, sleep_quality FROM stats WHERE user_id = ?", (user_id,))
         row = c.fetchone()
         
@@ -104,86 +102,112 @@ class HumanlikeCorePlugin(Star):
                 base_added, tacit_added, soul_added = 0.0, 0.0, 0.0
                 c.execute("UPDATE stats SET mood = ?, last_decay_day = ?, base_added_today = 0.0, tacit_added_today = 0.0, soul_added_today = 0.0 WHERE user_id = ?", (mood, today_str, user_id))
 
-        # ================= 2. 生理引擎计算 (体力与睡眠) =================
-        if self.enable_biology:
-            # 2.1 睡眠唤醒判定
-            if is_sleeping == 1:
-                if now >= wake_up_time:
-                    is_sleeping = 0
-                    # 优质睡眠回85，劣质回65
-                    energy = 85.0 if sleep_quality >= 0.8 else 65.0
-                    sleepiness = 0.0
-                    logger.info(f"🌅 自然醒来，体力恢复至 {energy}")
-                else:
-                    # 被吵醒判定
-                    if now - last_interact < 300: # 连发消息
-                        if any(w in text for w in ["对不起", "吵醒", "快睡", "晚安"]):
-                            energy -= 1.0 # 懂事安慰，轻微耗电
-                            sleep_quality -= 0.1 # 睡眠质量受损
-                        else:
-                            mood = max(0.0, mood - 15.0) # 起床气爆发
-                            sleep_quality = 0.5 # 劣质睡眠
-                            logger.info("😡 触发起床气！")
-            else:
-                # 2.2 计算时间差
-                delta_hours = (now - last_interact) / 3600.0
-                
-                # 2.3 自然流逝与回血
-                if delta_hours > 2.0:
-                    energy = min(100.0, energy + 10.0) # 超过2小时发呆回血
-                
-                # 基于时间的自然流逝 (简化版，按平均值)
-                drain_rate = 2.0 if 8 <= bj_hour < 18 else (6.0 if 18 <= bj_hour < 23 else 10.0)
-                energy -= delta_hours * drain_rate
-                sleepiness += delta_hours * (drain_rate * 1.5)
-
-                # 2.4 聊天交互消耗 (按时间差算，白天每小时5点，晚上翻倍)
-                if delta_hours < 1.0: # 连续高频聊天
-                    chat_cost = (delta_hours / 1.0) * (5.0 if bj_hour < 18 else (8.0 if bj_hour < 23 else 12.0))
-                    energy -= chat_cost
-                else:
-                    energy -= 2.0 # 偶尔发一句，固定扣点
-                
-                # 三餐回血 (简化的定点判定)
-                if 7 <= bj_hour < 9 and random.random() < 0.1: energy = min(100.0, energy + 5.0)
-                if 12 <= bj_hour < 13 and random.random() < 0.1: energy = min(100.0, energy + 8.0)
-                if 18 <= bj_hour < 19 and random.random() < 0.1: energy = min(100.0, energy + 8.0)
-
-                # 2.5 触发睡眠
-                if energy <= 5.0 or sleepiness >= 100.0:
-                    is_sleeping = 1
-                    wake_up_time = now + random.uniform(6*3600, 9*3600)
-                    energy = max(0.0, energy)
-                    logger.info(f"💤 困得不行了，开始睡觉，预计 {int((wake_up_time-now)/3600)} 小时后醒。")
-
-        # ================= 3. 记忆与三阶情感计算 =================
-        # (这里保留你之前 V1.1 的逻辑：打分、入库、默契、共鸣、心情变动)
-        score = 0
-        if len(text) >= 3 and not text.endswith(('?', '？', '吗', '呢')):
-            if any(w in text for w in ["记错了", "不对", "记住", "忘了"]):
-                score = 100.0
-                c.execute("UPDATE memories SET is_shadow = 1 WHERE user_id = ? AND content LIKE ?", (user_id, f"%{text[:5]}%"))
-            elif any(w in text for w in ["难过", "崩溃", "开心", "激动", "喜欢", "讨厌"]): score = 70.0
-            elif "我" in text or "我的" in text: score = 60.0
-            else: score = 50.0
-        if score > 0:
-            c.execute("INSERT INTO memories (user_id, content, score, last_time) VALUES (?, ?, ?, ?)", (user_id, text, score, now))
-
+        # ================= 1. 判定情感与互动 =================
+        is_tacit = False
+        is_soul = False
+        
         if len(text) >= 3 and base < 50.0 and base_added < 4.0:
             base += 0.5
             base_added += 0.5
         
         if tacit < 25.0 and tacit_added < 2.0:
-            if re.search(r'[（\(].*?[）\)]', text) or any(w in text for w in self.tacit_words) or text.endswith(('嘛', '呢', '呀')):
-                tacit += 0.5; tacit_added += 0.5
-            elif any(w in text for w in ["对不起", "原谅", "我错"]):
-                tacit += 1.0; tacit_added += 1.0
+            if re.search(r'[（\(].*?[）\)]', text) or any(w in text for w in self.tacit_words):
+                tacit += 0.5
+                tacit_added += 0.5
+                is_tacit = True
 
         if soul < 25.0 and soul_added < 1.5 and any(w in text for w in self.soul_words) and (now - last_soul_time > 86400):
-            soul += 1.0; soul_added += 1.0; last_soul_time = now
+            soul += 1.0
+            soul_added += 1.0
+            last_soul_time = now
+            is_soul = True
 
         if "开心" in text: mood = min(100.0, mood + 5.0)
         if "难过" in text: mood = max(0.0, mood - 5.0)
+
+        # ================= 2. 生理与心理引擎 =================
+        if self.enable_biology:
+            if is_sleeping == 1:
+                if now >= wake_up_time:
+                    is_sleeping = 0
+                    energy = 85.0 if sleep_quality >= 0.8 else 65.0
+                    sleepiness = 0.0
+                else:
+                    # 被吵醒判定
+                    if now - last_interact < 300: 
+                        if any(w in text for w in ["对不起", "吵醒", "快睡", "晚安", "乖", "抱抱"]):
+                            mood = min(100.0, mood + 2.0)
+                            logger.info("🥺 被温柔唤醒，心情微涨")
+                        elif any(w in text for w in ["陪我", "一会", "嘛", "好不好"]):
+                            mood = max(0.0, mood - 2.0)
+                            logger.info("😪 强行撒娇，无奈陪伴")
+                        elif any(w in text for w in ["起来", "别睡", "嗨", "醒醒"]):
+                            mood = max(0.0, mood - 15.0)
+                            logger.info("😡 强行吵醒，起床气爆发！")
+                            
+                        is_sleeping = 0
+                        energy = 10.0
+            else:
+                delta_hours = (now - last_interact) / 3600.0
+                
+                # 心情自然平复机制
+                if delta_hours > 0.5:
+                    if mood > 50.0:
+                        mood = max(50.0, mood - (delta_hours * 3.0))
+                    elif mood < 50.0:
+                        mood = min(50.0, mood + (delta_hours * 3.0))
+
+                # 体力自然流逝与回血
+                if delta_hours > 2.0:
+                    energy = min(100.0, energy + 10.0)
+                    sleepiness += delta_hours * 2.0
+                else:
+                    if 7 <= bj_hour < 18: drain = 2.0
+                    elif 18 <= bj_hour < 23: drain = 6.0
+                    else: drain = 10.0
+                    energy -= (delta_hours * drain) + 0.5 
+                    
+                    # 睡眠值累积
+                    sleep_growth_rate = 0.0
+                    if 8 <= bj_hour < 18: sleep_growth_rate = 3.0
+                    elif 18 <= bj_hour < 23: sleep_growth_rate = 8.0
+                    elif 23 <= bj_hour or bj_hour < 2: sleep_growth_rate = 15.0
+                    else: sleep_growth_rate = 25.0
+                    
+                    sleepiness += (delta_hours * sleep_growth_rate) + 0.1
+                    
+                    # 多巴胺抵消
+                    if is_tacit: sleepiness -= 3.0
+                    if is_soul: sleepiness -= 5.0
+                    if energy < 20.0: sleepiness += 2.0
+
+                # 睡眠时间锚点 (增强版)
+                if 23 <= bj_hour < 24: 
+                    sleepiness = max(sleepiness, 70.0) # 11点微困
+                elif 0 <= bj_hour < 2: 
+                    sleepiness = max(sleepiness, 85.0) # 过了12点，强行极度困倦
+                elif 2 <= bj_hour < 6: 
+                    sleepiness = max(sleepiness, 95.0) # 凌晨2点后，神仙也得睡
+                
+                # 体力时间锚点
+                if 23 <= bj_hour or bj_hour < 6: energy = min(energy, 60.0) 
+                elif 18 <= bj_hour < 23: energy = min(energy, 75.0)
+                
+                # 触发强制睡眠
+                if energy <= 5.0 or sleepiness >= 100.0:
+                    is_sleeping = 1
+                    wake_up_time = now + random.uniform(6*3600, 9*3600)
+                    energy = max(0.0, energy)
+
+        # ================= 3. 记忆逻辑 =================
+        score = 0
+        if len(text) >= 3 and not text.endswith(('?', '？', '吗', '呢')):
+            if any(w in text for w in ["记错了", "不对", "记住", "忘了"]): score = 100.0
+            elif any(w in text for w in ["难过", "崩溃", "开心", "激动", "喜欢", "讨厌"]): score = 70.0
+            elif "我" in text or "我的" in text: score = 60.0
+            else: score = 50.0
+        if score > 0:
+            c.execute("INSERT INTO memories (user_id, content, score, last_time) VALUES (?, ?, ?, ?)", (user_id, text, score, now))
 
         # ================= 4. 存库收尾 =================
         c.execute("UPDATE stats SET mood=?, base_intimacy=?, tacit_intimacy=?, soul_intimacy=?, base_added_today=?, tacit_added_today=?, soul_added_today=?, last_soul_time=?, energy=?, sleepiness=?, last_interact=?, is_sleeping=?, wake_up_time=?, sleep_quality=? WHERE user_id=?",
@@ -197,65 +221,39 @@ class HumanlikeCorePlugin(Star):
         hour = bj_time.hour
         time_status = "日常时间" if 7 <= hour < 23 else "深夜"
         user_id = event.get_sender_id()
-        user_text = event.message_str
-        now = time.time()
 
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, energy, sleepiness, is_sleeping FROM stats WHERE user_id = ?", (user_id,))
+        c.execute("SELECT mood, energy, sleepiness, is_sleeping FROM stats WHERE user_id = ?", (user_id,))
         row = c.fetchone()
-        mood, base, tacit, soul, energy, sleepiness, is_sleeping = row if row else (50.0, 0.0, 0.0, 0.0, 85.0, 0.0, 0)
-        total_intimacy = base + tacit + soul
+        mood, energy, sleepiness, is_sleeping = row if row else (50.0, 85.0, 0.0, 0)
 
-        # 记忆召回
-        c.execute("SELECT id, content, score, last_time, is_shadow FROM memories WHERE user_id = ?", (user_id,))
+        c.execute("SELECT content, score, last_time, is_shadow FROM memories WHERE user_id = ?", (user_id,))
         rows = c.fetchall()
-        expand_keywords = [k for k, v in self.synonyms.items() if any(rw in user_text for rw in v)]
         valid_memories = []
-        for mid, content, score, last_time, is_shadow in rows:
-            days = (now - last_time) / 86400.0
-            current_score = score * math.pow(self.decay_rate, days)
-            if current_score < self.shadow_threshold and is_shadow == 0:
-                c.execute("UPDATE memories SET is_shadow = 1 WHERE id = ?", (mid,))
-                is_shadow = 1
-            if is_shadow == 0: valid_memories.append((current_score, content))
-            elif any(word in content for word in expand_keywords):
-                valid_memories.append((current_score, f"（模糊的记忆）你隐约记得：{content}..."))
-        conn.commit()
+        for content, score, last_time, is_shadow in rows:
+            if is_shadow == 0: valid_memories.append((score, content))
+            elif any(word in content for word in self.synonyms.keys()): valid_memories.append((score, f"（模糊的记忆）你隐约记得：{content}..."))
         conn.close()
 
-        valid_memories.sort(reverse=True, key=lambda x: x[0])
         top_memories = [m[1] for m in valid_memories[:3]]
         memory_text = "你记得：" + "，".join(top_memories) if top_memories else "你暂时没有清晰的记忆。"
 
-        # 关系与状态判定
-        if total_intimacy > 80 and soul > 15: relation = "你们是灵魂伴侣/情侣。"
-        elif total_intimacy > 60 and tacit > 10: relation = "你们是默契的死党/挚友。"
-        elif total_intimacy > 30: relation = "你们是要好的朋友。"
-        else: relation = "你们刚认识，保持礼貌。"
-
         if is_sleeping == 1: 
-            state_text = "你现在被吵醒了，极度困倦，带着起床气，只想马上继续睡。"
-        elif energy < 30:
-            state_text = "你现在体力极低，极其慵懒，完全不想动，说话非常短。"
-        elif sleepiness > 90:
-            state_text = "你现在处于半梦半醒状态，说话断断续续，想打哈欠，甚至可以打错字。"
-        elif mood < 30:
-            state_text = "你现在心情极度低落，不想说话。"
-        elif mood > 70:
-            state_text = "你现在心情极好，话多，喜欢用波浪号。"
-        else:
-            state_text = "你现在精神正常，心情平静。"
+            state_text = "你现在被吵醒了，带着起床气，极度困倦。"
+        elif energy < 30 or sleepiness > 90: 
+            state_text = "你现在极度困倦，半梦半醒，说话断断续续，想打哈欠。"
+        elif mood < 30: 
+            state_text = "你现在心情极度低落。"
+        else: 
+            state_text = "你现在精神正常。"
 
         sys_prompt = f"""
 【你的状态】{time_status}。{state_text} 当前体力:{energy:.0f}，睡眠值:{sleepiness:.0f}。
-【你的关系】{relation}
 【关于对方的记忆】{memory_text}
-【聊天规则（绝对遵守）】
-1. 像微信聊天，禁止客服腔。
-2. 控制在{self.max_len}个字以内。
-3. 记忆里的事是对方发生的，不是你的！
-4. 根据你的体力、睡眠和心情状态，表现出对应的语气。
+【聊天规则】
+1. 像微信聊天，控制在{self.max_len}个字以内。
+2. 根据你的体力、睡眠和心情状态，表现出对应的语气。如果困了就直说，不要硬撑。
 """
         if req.system_prompt: req.system_prompt += "\n" + sys_prompt
         else: req.system_prompt = sys_prompt
@@ -266,7 +264,6 @@ class HumanlikeCorePlugin(Star):
         if not result: return
         result_text = result.get_plain_text()
         if not result_text: return
-        for word in ["作为一个AI", "人工智能", "很高兴为您服务"]: result_text = result_text.replace(word, "")
         parts = [p.strip() for p in re.split(r'(?<=[。！？!?])', result_text) if p.strip()]
         if len(parts) <= 1: event.set_result(event.plain_result(result_text)); return
         for i, part in enumerate(parts[:3]):
@@ -278,27 +275,38 @@ class HumanlikeCorePlugin(Star):
     @filter.command("status")
     async def status(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
+        now = time.time()
+        bj_hour = datetime.now(timezone(timedelta(hours=8))).hour
+        
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, energy, sleepiness, is_sleeping FROM stats WHERE user_id=?", (user_id,))
+        c.execute("SELECT mood, base_intimacy, tacit_intimacy, soul_intimacy, energy, sleepiness, is_sleeping, base_added_today, tacit_added_today, soul_added_today FROM stats WHERE user_id=?", (user_id,))
         row = c.fetchone()
-        conn.close()
+        
         if row:
-            mood, base, tacit, soul, energy, sleep, is_sleep = row
-            sleep_str = "💤 正在睡觉" if is_sleep else "👀 醒着"
-            yield event.plain_result(f"❤️ 心情: {mood:.1f}/100\n🔋 体力: {energy:.1f}/100\n😴 睡眠值: {sleep:.1f}/100\n状态: {sleep_str}\n🤝 基础好感: {base:.1f}/50\n🔥 默契羁绊: {tacit:.1f}/25\n✨ 灵魂共鸣: {soul:.1f}/25")
+            mood, base, tacit, soul, energy, sleep, is_sleep, b_added, t_added, s_added = row
+            
+            # 临时修正：如果是查面板，也强行展示它该有的困意
+            if is_sleep == 0:
+                if 0 <= bj_hour < 2: sleep = max(sleep, 85.0)
+                elif 23 <= bj_hour < 24: sleep = max(sleep, 70.0)
+                elif 2 <= bj_hour < 6: sleep = max(sleep, 95.0)
 
-    @filter.command("forget")
-    async def forget(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        c.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-        c.execute("DELETE FROM stats WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        yield event.plain_result("（委屈巴巴）好啦，我已经把关于你的事情全都忘掉了...")
+            conn.close()
+            sleep_str = "💤 正在睡觉" if is_sleep else "👀 醒着"
+            b_added = b_added or 0.0
+            t_added = t_added or 0.0
+            s_added = s_added or 0.0
+            yield event.plain_result(
+                f"❤️ 心情: {mood:.1f}/100\n"
+                f"🔋 体力: {energy:.1f}/100\n"
+                f"😴 睡眠值: {sleep:.1f}/100\n"
+                f"状态: {sleep_str}\n"
+                f"🤝 基础好感: {base:.1f}/50 (今日加: {b_added:.1f}/4.0)\n"
+                f"🔥 默契羁绊: {tacit:.1f}/25 (今日加: {t_added:.1f}/2.0)\n"
+                f"✨ 灵魂共鸣: {soul:.1f}/25 (今日加: {s_added:.1f}/1.5)"
+            )
 
     @filter.command("ping")
     async def ping(self, event: AstrMessageEvent):
-        yield event.plain_result("V1.2 生理引擎版运行正常。")
+        yield event.plain_result("V1.2 终极生理与情感版运行正常。")
