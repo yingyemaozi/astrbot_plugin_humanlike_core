@@ -2,7 +2,7 @@
   "decay_rate": {
     "type": "float",
     "default": 0.85,
-    "description": "记忆每天保留的比例（0.85代表每天衰减15%）"
+    "description": "记忆每天保留的比例"
   },
   "shadow_threshold": {
     "type": "int",
@@ -14,9 +14,9 @@
     "default": 20,
     "description": "单次回复最大字数"
   },
-  "enable_diary": {
+  "enable_biology": {
     "type": "bool",
     "default": true,
-    "description": "是否开启每日赛博日记"
+    "description": "是否开启拟真生理引擎（体力与睡眠）"
   }
 }
